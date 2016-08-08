@@ -125,7 +125,7 @@ function stats:long() {
 
 	foreach([pool] in flushed_dirty_amt_hist) {
 	        if(@count(flushed_dirty_amt_hist[pool])) {
-	                printf("== Data flushed in each txg_sync\n");
+	                printf("== Data flushed in each txg_sync (%s) \n",  kernel_string(pool));
 			printf("MB \n");
                 	print(@hist_linear(flushed_dirty_amt_hist[pool], 0, 2000, 100))
         	}
