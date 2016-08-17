@@ -91,7 +91,8 @@ probe module("zfs").function("dmu_tx_delay").return {
 probe module("zfs").function("spa_sync")
 {
 	dirty = $spa->spa_dsl_pool->dp_dirty_pertxg[$txg & 3];
-
+	dirty = dirty/(1024*1024);
+	
 	if(dirty != 0)
 		flushed_dirty_amt_hist[$spa->spa_name] <<< dirty;
 }
