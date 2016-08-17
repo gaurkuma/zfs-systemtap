@@ -133,8 +133,9 @@ function stats:long() {
 	}
 
 	if (@count(write_hist)) {
-                printf("Write: Latency    (min/avg/max) --> %d/%d/%d msec\n", @min(write_hist), @avg(write_hist), @max(write_hist));
 		printf("Write: Throughput --> %d IOPS\n", (wr_throughput*1000)/wr_intv);
+                printf("Write: Latency    (min/avg/max) --> %d/%d/%d msec\n", @min(write_hist), @avg(write_hist), @max(write_hist));
+		printf("ms\n");
                 print(@hist_linear(write_hist, 0, 500, 10))
         }
 
