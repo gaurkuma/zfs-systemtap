@@ -1,15 +1,15 @@
-/* This script is used to see if there are any delays being posted to 
+/* This script is used to see if there are any delays being posted to
  * the client side because we are unable to handle too much I/O.
  * There are two aspects of it which is based on zfs_dirty_max parameter
  * which is set to 10%RAM. The soft limit is set to 60% of zfs_dirty_max
- * 1. Between soft_limit/2 and soft_limit, async writes are given more 
+ * 1. Between soft_limit/2 and soft_limit, async writes are given more
  *    preference increasing linearly and set to max the ASYNC queue supports
- *    beyond soft limit. 
- * 2. Once the above try fails to keep up with the incoming I/O, start delaying the 
+ *    beyond soft limit.
+ * 2. Once the above try fails to keep up with the incoming I/O, start delaying the
  *    client. The delay
  *         a) is max of 100msec as long as we are under the hard limit
  *         b) is non-deterministic and is based on the time it takes the dirty buffer size
- *            to shrink below the hard limit. 
+ *            to shrink below the hard limit.
  *
  * USAGE: stap -v -d zfs zfs_dirtybuf_delay.stp <Display Frequency>
  *
@@ -18,10 +18,10 @@
  *        b) zfs_vdev_async_write_active_min_dirty_percent
  *        c) zfs_dirty_max
  *        d) zfs_vdev_async_write_min_active
- *        e) zfs_vdev_async_write_max_active 
+ *        e) zfs_vdev_async_write_max_active
  *        f) zfs_delay_scale
- *	Goal: Ideal is to not delay but if client is really pumping hard
- *	      try to make sure delays are consistent and less. 
+ *      Goal: Ideal is to not delay but if client is really pumping hard
+ *            try to make sure delays are consistent and less.
  */
 
 /* IN MB's */
@@ -30,10 +30,11 @@ global soft_limit=0
 global write_c
 global write_t
 
-global dirty_hist
 global dmu_tx_delay_hist
 global flushed_dirty_amt_hist
 global write_hist
+global sync_freq_hist
+global sync_time_hist
 
 global probe_start
 global dirty=0;
@@ -41,102 +42,114 @@ global dmu_tx_delay_t_start=0;
 global first_wr_ts = 0;
 global last_wr_ts = 0;
 global cnt=0;
+global sync_ts=0;
 
 /* Write Latency */
 probe module("zfs").function("zpl_write")
 {
-	if(cnt == 0) {
-		first_wr_ts = gettimeofday_ms();
-		cnt++;
-	}
-	
-	write_t[tid()] = gettimeofday_ms();
+        if(cnt == 0) {
+                first_wr_ts = gettimeofday_ms();
+                cnt++;
+        }
+
+        write_t[tid()] = gettimeofday_ms();
         write_c[tid()]++;
 }
 
 probe module("zfs").function("zpl_write").return
 {
-	last_wr_ts = gettimeofday_ms();
+        last_wr_ts = gettimeofday_ms();
         diff = last_wr_ts - write_t[tid()];
         write_c[tid()]++;
         write_hist <<< diff;
 }
 
 /* CLient Side Delay - Phase 2 */
-/* This fn always called when assigning a txg to a tx to check if we are 
- * maxing out dirty buffers and slow down the client
- */
-probe module("zfs").function("dsl_pool_need_dirty_delay") {
-	/* Pool level dirty data */
-        data = $dp->dp_dirty_total
-	/* Convert in MBs */
-	data = data/(1024*1024);
-	dirty_hist[$dp->dp_spa->spa_name] <<< data;
+
+probe module("zfs").function("dmu_tx_wait") {
+        if($tx->tx_wait_dirty) {
+                hard_limit = $zfs_dirty_data_max;
+                soft_limit = ($zfs_dirty_data_max * $zfs_delay_min_dirty_percent) / 100
+                dmu_tx_delay_t_start = gettimeofday_ms();
+        }
 }
 
-probe module("zfs").function("dmu_tx_delay") {
-	hard_limit = $zfs_dirty_data_max;
-	soft_limit = ($zfs_dirty_data_max * $zfs_delay_min_dirty_percent) / 100
-        dmu_tx_delay_t_start = gettimeofday_ms();
-}
-
-probe module("zfs").function("dmu_tx_delay").return {
-        diff = gettimeofday_ms() - dmu_tx_delay_t_start;
-        dmu_tx_delay_hist <<< diff;
-
-        if(diff > 100)
-                printf("Warning:  DELAY MORE than 100msec [%d] \n", diff);
+probe module("zfs").function("dmu_tx_wait").return {
+        if($tx->tx_wait_dirty) {
+                diff = gettimeofday_ms() - dmu_tx_delay_t_start;
+                dmu_tx_delay_hist <<< diff;
+        }
 }
 
 probe module("zfs").function("spa_sync")
 {
-	dirty = $spa->spa_dsl_pool->dp_dirty_pertxg[$txg & 3];
-	dirty = dirty/(1024*1024);
-	
-	if(dirty != 0)
-		flushed_dirty_amt_hist[$spa->spa_name] <<< dirty;
+        if(sync_ts == 0) {
+                sync_ts = gettimeofday_ms();
+        } else {
+                ts_in_msec = gettimeofday_ms();
+                sync_freq = ts_in_msec - sync_ts;
+                sync_ts = ts_in_msec;
+                sync_freq_hist[$spa->spa_name] <<< sync_freq
+        }
+
+        dirty = $spa->spa_dsl_pool->dp_dirty_pertxg[$txg & 3];
+        dirty = dirty/(1024*1024);
+        if(dirty != 0)
+                flushed_dirty_amt_hist[$spa->spa_name] <<< dirty;
+}
+
+probe module("zfs").function("spa_sync").return
+{
+        sync_time_hist[$spa->spa_name] <<< (gettimeofday_ms() - sync_ts);
 }
 
 function stats:long() {
-	wr_throughput = 0;
-	intv = (gettimeofday_s() - probe_start);	
-	wr_intv = last_wr_ts - first_wr_ts;
-        printf("Run Interval %d [%s to %s] \n", intv, ctime(probe_start), ctime(gettimeofday_s()))
+        wr_throughput = 0;
+        intv = (gettimeofday_s() - probe_start);
+        wr_intv = last_wr_ts - first_wr_ts;
+        printf("\n\n\n -----> Run Interval %d [%s to %s] \n", intv, ctime(probe_start), ctime(gettimeofday_s()))
 
-	foreach (thread_id in write_c)
+        foreach (thread_id in write_c)
                 wr_throughput += write_c[thread_id]/2;
-	
-	if(hard_limit != 0)
-		printf("Soft Limit: %d, Hard Limit: %d] \n", soft_limit, hard_limit)
 
-	/* 100MB Interval */
-	foreach([pool] in dirty_hist) {
-		if (@count(dirty_hist[pool])) {
-	                printf("== Dirty Buildup (%s) \n", kernel_string(pool));
-			printf("MB \n");
-                	print(@hist_linear(dirty_hist[pool], 0, 2000, 100))
-        	}
-	}
-	if (@count(dmu_tx_delay_hist)) {
+        if(hard_limit != 0)
+                printf("Soft Limit: %d, Hard Limit: %d] \n", soft_limit, hard_limit)
+
+        if (@count(dmu_tx_delay_hist)) {
                 printf("== Client Delay \n")
-		printf("ms \n");
-                print(@hist_linear(dmu_tx_delay_hist, 0, 200, 10))
+                printf("ms \n");
+                print(@hist_log(dmu_tx_delay_hist))
         }
 
 
-	foreach([pool] in flushed_dirty_amt_hist) {
-	        if(@count(flushed_dirty_amt_hist[pool])) {
-	                printf("== Data flushed in each txg_sync (%s) \n",  kernel_string(pool));
-			printf("MB \n");
-                	print(@hist_linear(flushed_dirty_amt_hist[pool], 0, 2000, 100))
-        	}
-	}
+        foreach([pool] in flushed_dirty_amt_hist) {
+                if(@count(flushed_dirty_amt_hist[pool])) {
+                        printf("== Data flushed in each txg_sync (%s) \n",  kernel_string(pool));
+                        printf("MB \n");
+                        print(@hist_log(flushed_dirty_amt_hist[pool]))
+                }
+        }
 
-	if (@count(write_hist)) {
-		printf("Write: Throughput --> %d IOPS\n", (wr_throughput*1000)/wr_intv);
+        foreach([pool] in sync_freq_hist) {
+                if(@count(sync_freq_hist[pool])) {
+                        printf("== txg sync freq for pool (%s) \n",  kernel_string(pool));
+                        printf("msec \n");
+                        print(@hist_log(sync_freq_hist[pool]))
+                }
+        }
+
+        foreach([pool] in sync_time_hist) {
+                if(@count(sync_time_hist[pool])) {
+                        printf("== txg sync time for pool (%s) \n",  kernel_string(pool));
+                        printf("msec \n");
+                        print(@hist_log(sync_time_hist[pool]))
+                }
+        }
+
+        if (@count(write_hist)) {
                 printf("Write: Latency    (min/avg/max) --> %d/%d/%d msec\n", @min(write_hist), @avg(write_hist), @max(write_hist));
-		printf("ms\n");
-                print(@hist_linear(write_hist, 0, 500, 10))
+                printf("Write: Throughput --> %d IOPS\n", (wr_throughput*1000)/wr_intv);
+                print(@hist_log(write_hist))
         }
 
 
@@ -147,15 +160,15 @@ probe timer.s($1) {
 }
 
 function init:long() {
-        delete dirty_hist
+
         delete dmu_tx_delay_hist
-	delete flushed_dirty_amt_hist
-	delete write_hist
-	delete probe_start
-	delete dirty
-	delete dmu_tx_delay_t_start
-	delete write_c
-	delete write_t
+        delete flushed_dirty_amt_hist
+        delete write_hist
+        delete probe_start
+        delete dirty
+        delete dmu_tx_delay_t_start
+        delete write_c
+        delete write_t
 
 }
 
