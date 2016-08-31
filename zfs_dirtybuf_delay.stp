@@ -35,14 +35,16 @@ global flushed_dirty_amt_hist
 global write_hist
 global sync_freq_hist
 global sync_time_hist
+global sync_actual_ts
 
 global probe_start
 global dirty=0;
-global dmu_tx_delay_t_start=0;
+global dmu_tx_delay_t_start;
 global first_wr_ts = 0;
 global last_wr_ts = 0;
 global cnt=0;
 global sync_ts=0;
+
 
 /* Write Latency */
 probe module("zfs").function("zpl_write")
@@ -70,13 +72,13 @@ probe module("zfs").function("dmu_tx_wait") {
         if($tx->tx_wait_dirty) {
                 hard_limit = $zfs_dirty_data_max;
                 soft_limit = ($zfs_dirty_data_max * $zfs_delay_min_dirty_percent) / 100
-                dmu_tx_delay_t_start = gettimeofday_ms();
+                dmu_tx_delay_t_start[tid()] = gettimeofday_ms();
         }
 }
 
 probe module("zfs").function("dmu_tx_wait").return {
         if($tx->tx_wait_dirty) {
-                diff = gettimeofday_ms() - dmu_tx_delay_t_start;
+                diff = gettimeofday_ms() - dmu_tx_delay_t_start[tid()];
                 dmu_tx_delay_hist <<< diff;
         }
 }
@@ -100,7 +102,10 @@ probe module("zfs").function("spa_sync")
 
 probe module("zfs").function("spa_sync").return
 {
-        sync_time_hist[$spa->spa_name] <<< (gettimeofday_ms() - sync_ts);
+        diff = (gettimeofday_ms() - sync_ts);
+        sync_time_hist[$spa->spa_name] <<< diff
+        if(diff >= 20000)
+                sync_actual_ts[$spa->spa_name, diff] = sync_ts;
 }
 
 function stats:long() {
@@ -146,6 +151,12 @@ function stats:long() {
                 }
         }
 
+        foreach([pool, t] in sync_actual_ts) {
+                        printf("== pool (%s) \n",  kernel_string(pool));
+                        print("[%s]", ctime(sync_actual_ts[pool,t]/1000))
+        }
+        printf("\n");
+
         if (@count(write_hist)) {
                 printf("Write: Latency    (min/avg/max) --> %d/%d/%d msec\n", @min(write_hist), @avg(write_hist), @max(write_hist));
                 printf("Write: Throughput --> %d IOPS\n", (wr_throughput*1000)/wr_intv);
@@ -184,4 +195,5 @@ probe begin {
 probe end {
         stats()
 }
+
 
