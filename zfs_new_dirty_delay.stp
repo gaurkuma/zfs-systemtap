@@ -63,8 +63,16 @@ probe module("zfs").function("zpl_write")
         write_t[tid()] = gettimeofday_ms();
         write_c[tid()]++;
 }
-/* CLient Side Delay - Phase 2 */
 
+probe module("zfs").function("zpl_write").return
+{       
+        last_wr_ts = gettimeofday_ms();
+        diff = last_wr_ts - write_t[tid()];
+        write_c[tid()]++;
+        write_hist <<< diff;
+}
+
+/* CLient Side Delay - Phase 2 */
 probe module("zfs").function("dmu_tx_wait") {
         if($tx->tx_wait_dirty) {
                 hard_limit = $zfs_dirty_data_max;
@@ -106,7 +114,6 @@ probe module("zfs").function("spa_sync").return
         if(diff >= 20000)
                 sync_actual_ts[$spa->spa_name, diff] = sync_ts;
 }
-
 function stats:long() {
         wr_throughput = 0;
         intv = (gettimeofday_s() - probe_start);
@@ -141,14 +148,6 @@ function stats:long() {
                         print(@hist_log(sync_freq_hist[pool]))
                 }
         }
-}
-
-probe module("zfs").function("zpl_write").return
-{       
-        last_wr_ts = gettimeofday_ms();
-        diff = last_wr_ts - write_t[tid()];
-        write_c[tid()]++;
-        write_hist <<< diff;
 
         foreach([pool] in sync_time_hist) {
                 if(@count(sync_time_hist[pool])) {
