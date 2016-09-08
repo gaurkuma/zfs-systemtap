@@ -141,6 +141,7 @@ function stats:long() {
                         print(@hist_log(sync_freq_hist[pool]))
                 }
         }
+}
 
 probe module("zfs").function("zpl_write").return
 {       
@@ -148,7 +149,7 @@ probe module("zfs").function("zpl_write").return
         diff = last_wr_ts - write_t[tid()];
         write_c[tid()]++;
         write_hist <<< diff;
-}
+
         foreach([pool] in sync_time_hist) {
                 if(@count(sync_time_hist[pool])) {
                         printf("== txg sync time for pool (%s) \n",  kernel_string(pool));
