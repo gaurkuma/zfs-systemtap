@@ -48,24 +48,40 @@ global cnt=0;
 global sync_ts=0;
 
 global last_txg;
+global trim_latency_ts;
+global trim_latency_hist;
+global block_alloc_latency_hist;
 
-probe module("zfs").function("spa_trimstats_update") {
+//probe module("zfs").function("gk_timestamp")
+//{
+//      block_alloc_latency_hist <<< $diff
+//}
+
+probe module("zfs").function("zio_trim") {
+        trim_latency_ts = gettimeofday_us();
+}
+
+probe module("zfs").function("metaslab_trim_done") {
+        trim_latency_hist <<< (gettimeofday_us() - trim_latency_ts)
+}
+
+probe module("zfs").function("spa_tx_trim_add_bytes") {
         trim_hist <<< ($bytes/(1024))
 }
 /* Write Latency */
 probe module("zfs").function("zpl_write")
-{       
+{
         if(cnt == 0) {
                 first_wr_ts = gettimeofday_ms();
                 cnt++;
         }
-        
+
         write_t[tid()] = gettimeofday_ms();
         write_c[tid()]++;
 }
 
 probe module("zfs").function("zpl_write").return
-{       
+{
         last_wr_ts = gettimeofday_ms();
         diff = last_wr_ts - write_t[tid()];
         write_c[tid()]++;
@@ -169,7 +185,18 @@ function stats:long() {
                 print(@hist_log(trim_hist))
         }
 
-        if (@count(write_hist)) {
+        if(@count(trim_latency_hist)) {
+                printf("TRIMS Latency   (min/avg/max) --> %d/%d/%d usec\n", @min(trim_latency_hist), @avg(trim_latency_hist), @max(trim_latency_hist));
+                printf("us\n");
+                print(@hist_log(trim_latency_hist))
+        }
+        //if(@count(block_alloc_latency_hist)) {
+        //      printf("Block Alloc delay (min/avg/max) --> %d/%d/%d nsec \n", @min(block_alloc_latency_hist), @avg(block_alloc_latency_hist), @max(block_alloc_latency_hist));
+          //      printf("ns\n");
+            //    print(@hist_log(block_alloc_latency_hist))
+        //}
+
+        if (@count(write_hist) && wr_intv) {
                 printf("Write: Latency    (min/avg/max) --> %d/%d/%d msec\n", @min(write_hist), @avg(write_hist), @max(write_hist));
                 printf("Write: Throughput --> %d IOPS\n", (wr_throughput*1000)/wr_intv);
                 print(@hist_log(write_hist))
@@ -207,4 +234,3 @@ probe begin {
 probe end {
         stats()
 }
-
