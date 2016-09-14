@@ -1,0 +1,58 @@
+global probe_start;
+global ts_hist;
+global ts_start;
+global cnt=0;
+
+probe module("zfs").function("zio_dva_allocate") {
+        if(cnt < 10) {
+                cnt++;
+                print_current_stack_trace();
+        }
+}
+
+probe module("zfs").function("metaslab_df_alloc")
+{
+        ts_start[tid()] = gettimeofday_us();
+}
+
+probe module("zfs").function("metaslab_df_alloc").return
+{
+        ts_hist <<< (gettimeofday_us() - ts_start[tid()]);
+}
+
+
+function stats:long() {
+        intv=0;
+        intv = (gettimeofday_s() - probe_start);
+
+        printf("Run Interval %d secs[%s to %s]\n", intv, tz_ctime(probe_start), tz_ctime(gettimeofday_s()))
+        if (@count(ts_hist)) {
+                printf("===  Latency    (min/avg/max) --> %d/%d/%d msec\n", @min(ts_hist)/1000, @avg(ts_hist)/1000, @max(ts_hist)/1000);
+                printf("us\n");
+                print(@hist_log(ts_hist))
+        }
+}
+
+probe timer.s($1)
+{
+       stats()
+}
+
+function init:long() {
+        delete ts_hist;
+        delete ts_start;
+}
+
+probe begin {
+        # Start fresh
+        init()
+
+        # Keep an account of when the test was started
+        probe_start =  (gettimeofday_s())
+
+}
+
+probe end
+{
+     stats()
+}
